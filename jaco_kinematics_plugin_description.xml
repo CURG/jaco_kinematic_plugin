@@ -1,0 +1,7 @@
+<library path="lib/libmoveit_jaco_kinematics_plugin">
+  <class name="jaco_kinematics_plugin/JacoKinematicsPlugin" type="jaco_kinematics_plugin::JacoKinematicsPlugin" base_class_type="kinematics::KinematicsBase">
+    <description>
+      A implementation of kinematics as a plugin based on KDL.
+    </description>
+  </class>
+</library>
