@@ -37,6 +37,7 @@
 #include <jaco_kinematics_plugin/jaco_kinematics_plugin.h>
 #include <class_loader/class_loader.h>
 #include <boost/foreach.hpp>
+#include <angles/angles.h>
 
 //register KDLKinematics as a KinematicsBase implementation
 CLASS_LOADER_REGISTER_CLASS(jaco_kinematics_plugin::JacoKinematicsPlugin, kinematics::KinematicsBase)
@@ -72,10 +73,10 @@ bool JacoKinematicsPlugin::getPositionIK(const geometry_msgs::Pose &ik_pose,
   return searchPositionIK(ik_pose,
                           ik_seed_state,
                           default_timeout_,
+                          consistency_limits_,
                           solution,
                           solution_callback,
                           error_code,
-                          consistency_limits_,
                           options);
 }
 
@@ -91,10 +92,10 @@ bool JacoKinematicsPlugin::searchPositionIK(const geometry_msgs::Pose &ik_pose,
   return searchPositionIK(ik_pose,
                           ik_seed_state,
                           timeout,
+                          consistency_limits_,
                           solution,
                           solution_callback,
                           error_code,
-                          consistency_limits_,
                           options);
 }
 
@@ -111,10 +112,10 @@ bool JacoKinematicsPlugin::searchPositionIK(const geometry_msgs::Pose &ik_pose,
   return searchPositionIK(ik_pose,
                           ik_seed_state,
                           timeout,
+                          consistency_limits_,
                           solution,
                           solution_callback,
                           error_code,
-                          consistency_limits_,
                           options);
 }
 
@@ -147,27 +148,32 @@ void JacoKinematicsPlugin::cacheLastState(sensor_msgs::JointStateConstPtr &state
 bool JacoKinematicsPlugin::searchPositionIK(const geometry_msgs::Pose &ik_pose,
                               const std::vector<double> &ik_seed_state,
                               double timeout,
+                              const std::vector<double> &consistency_limits,
                               std::vector<double> &solution,
                               const IKCallbackFn &solution_callback,
                               moveit_msgs::MoveItErrorCodes &error_code,
-                              const std::vector<double> &consistency_limits,
                               const kinematics::KinematicsQueryOptions &options) const
 {
     std::vector <double> desired_joints(6,0);
     int i = 0;
-    //BOOST_FOREACH(const double j, ik_seed_state)
-    //{
-     //   std::cout << "position=" << last_state_.position[i] << std::endl;
-     //   desired_joints[i] = nearest_equivelent(j, last_state_.position[i]);
-     //   ++i;
-    //}
-
+    for (i=0; i < 6; ++i)
+        desired_joints[i] = last_state_.position[i];
+    i = 0;
     BOOST_FOREACH(const double j, ik_seed_state)
+    {
+       std::cout << "last position=" << last_state_.position[i] << std::endl;
+       std::cout << "desired position=" << desired_joints[i] << std::endl;
+       std::cout << "consistency_limits=" << consistency_limits << std::endl;
+       ++i;
+    }
+
+    /*BOOST_FOREACH(const double j, ik_seed_state)
         {
            std::cout << "position=" << last_state_.position[i] << std::endl;
            desired_joints[i] = last_state_.position[i];
            ++i;
-        }
+        }   
+        */
     bool success = kdl_kinematics_plugin::KDLKinematicsPlugin::searchPositionIK(ik_pose,
                               desired_joints,
                               timeout,
@@ -176,6 +182,15 @@ bool JacoKinematicsPlugin::searchPositionIK(const geometry_msgs::Pose &ik_pose,
                               error_code,
                               consistency_limits,
                               options);
+    //The wrist positions are equivalent facing either up or down, so we might as well use the closest
+//    double rotated_angle_distance;
+//    double angle_distance;
+//    angles::shortest_angular_distance_with_limits(solution[5]+ M_PI, last_state_.position[5], -2.0*M_PI, 2.0*M_PI, rotated_angle_distance);
+//    angles::shortest_angular_distance_with_limits(solution[5], last_state_.position[5], -2.0*M_PI, 2.0*M_PI, angle_distance);
+//    if(angle_distance > rotated_angle_distance)
+//            solution[5] = solution[5] + M_PI;
+//    if(fabs(solution[5] - last_state_.position[5]) > M_PI)
+//      solution[5] -= 2.0*M_PI;
     ROS_INFO_STREAM("Pose: " << ik_pose << std::endl
 
                     << " Seed: " << desired_joints << std::endl

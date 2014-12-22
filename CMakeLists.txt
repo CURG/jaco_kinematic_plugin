@@ -12,9 +12,9 @@ find_package(Eigen REQUIRED)
 
 catkin_package(
   INCLUDE_DIRS include
-  CATKIN_DEPENDS
-     moveit_ros_planning
+  CATKIN_DEPENDS     
          geometry_msgs
+        moveit_ros_planning
          moveit_msgs
          moveit_core
 	 moveit_ros)
