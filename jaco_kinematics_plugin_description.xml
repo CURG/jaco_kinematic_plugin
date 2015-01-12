@@ -4,4 +4,15 @@
       A implementation of kinematics as a plugin based on KDL. 
     </description>
   </class>
+  <class name="jaco_kinematics_plugin/JacoKinematicsNNCachePlugin" type="jaco_kinematics_plugin::JacoKinematicsNNCachePlugin" base_class_type="kinematics::KinematicsBase"> 
+    <description>
+      A implementation of kinematics as a plugin based on KDL. 
+    </description>
+  </class>
+  <class name="jaco_kinematics_plugin/JacoKinematicsTimingPlugin" type="jaco_kinematics_plugin::JacoKinematicsTimingPlugin" base_class_type="kinematics::KinematicsBase"> 
+    <description>
+      A implementation of kinematics as a plugin based on KDL. 
+    </description>
+  </class>
+
 </library>
