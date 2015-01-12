@@ -30,6 +30,9 @@ link_directories(${catkin_LIBRARY_DIRS})
 add_library(jaco_kinematics_plugin src/jaco_kinematics_plugin.cpp)
 target_link_libraries(jaco_kinematics_plugin moveit_kdl_kinematics_plugin ${catkin_LIBRARIES})
 
+add_library(jaco_planning_adapter_plugin src/cache_planning_request_adapter.cpp)
+target_link_libraries(jaco_planning_adapter_plugin ${catkin_LIBRARIES} flann)
+
 install(
   FILES
   jaco_kinematics_plugin_description.xml
