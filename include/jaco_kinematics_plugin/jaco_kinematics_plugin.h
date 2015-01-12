@@ -38,6 +38,11 @@
 #define JACO_KINEMATICS_PLUGIN_ 
 
 #include <moveit/kdl_kinematics_plugin/kdl_kinematics_plugin.h>
+#include <flann/flann.hpp>
+#include <map>
+#include <vector>
+#include <boost/thread/mutex.hpp>
+
 
 namespace jaco_kinematics_plugin
 {
@@ -129,9 +134,24 @@ namespace jaco_kinematics_plugin
     //Create a joint states subscriber that caches last state
     ros::Subscriber joint_state_sub_;
     sensor_msgs::JointState last_state_;
-    void cacheLastState(sensor_msgs::JointStateConstPtr & state);
+    bool use_nearest_neighbors_;
+    double max_neighbor_distance_;
 
+
+    typedef std::map<const size_t, std::vector<double> > TranslationMap;
+
+    void cacheLastState(sensor_msgs::JointStateConstPtr & state);
+    flann::Index<flann::L2<double> > *index_;
+    flann::Matrix<double> empty_dataset;
+    TranslationMap translation_map_;
     std::vector<double> consistency_limits_;
+
+    bool poseToMat(const geometry_msgs::Pose & pose ,flann::Matrix<double> & mat) const;
+    bool matToPose(const flann::Matrix<double> & mat, geometry_msgs::Pose & pose) const;
+    bool getNeighbor(const geometry_msgs::Pose & pose, std::vector<int> & query_results) const;
+    bool addItem(const geometry_msgs::Pose & pose, const std::vector<double> & translation);
+    bool getClosestTranslation( int & id, const geometry_msgs::Pose & pose, std::vector<double> &translation) const;
+    boost::mutex index_mutex_;
 
   };
 }
