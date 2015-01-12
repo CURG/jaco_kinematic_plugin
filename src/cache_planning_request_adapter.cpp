@@ -37,6 +37,7 @@
 #include <moveit/planning_request_adapter/planning_request_adapter.h>
 #include <class_loader/class_loader.h>
 #include <flann/flann.hpp>
+#include <ros/ros.h>
 
 namespace cache_planner_request_adapter
 {
@@ -48,21 +49,21 @@ class CacheAdapter : public planning_request_adapter::PlanningRequestAdapter
 protected:
     typedef std::map<const size_t, planning_interface::MotionPlanResponse > TranslationMap;
     flann::Index<flann::L2<double> > *index_;
-    flann::Matrix<double> empty_dataset;
+    flann::Matrix<double> dataset_;
     TranslationMap translation_map_;
     bool use_nearest_neighbors_;
     double max_neighbor_distance_;
-
+    ros::NodeHandle nh_;
 
 public:
   virtual std::string getDescription() const { return "Adapter that searches for nearby solution and uses it as starting point for further plans"; }
 
 
     CacheAdapter() : planning_request_adapter::PlanningRequestAdapter(), nh_("~"),
-    empty_dataset(NULL, 0,6)
+    dataset_(NULL, 0,6)
     {
-        nh.param("use_nearest_neighbors", use_nearest_neighbors_, true);
-        nh.param("max_neighbor_distance", max_neighbor_distance_, 0.1);
+        nh_.param("use_nearest_neighbors", use_nearest_neighbors_, true);
+        nh_.param("max_neighbor_distance", max_neighbor_distance_, 0.1);
 
     }
 
@@ -72,7 +73,6 @@ public:
                             planning_interface::MotionPlanResponse &res,
                             std::vector<std::size_t> &added_path_index) const
   {
-    req.goal_constraints[0];
     return planner(planning_scene, req, res);
   }
 
@@ -83,5 +83,5 @@ public:
 
 }
 
-CLASS_LOADER_REGISTER_CLASS(default_planner_request_adapters::Empty,
+CLASS_LOADER_REGISTER_CLASS(cache_planner_request_adapter::CacheAdapter,
                             planning_request_adapter::PlanningRequestAdapter);
