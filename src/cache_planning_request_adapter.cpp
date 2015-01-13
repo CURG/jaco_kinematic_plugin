@@ -41,6 +41,8 @@
 #include <boost/thread/locks.hpp>
 #include <boost/thread/shared_mutex.hpp>
 #include <map>
+#include <moveit/robot_state/conversions.h>
+
 
 namespace cache_planner_request_adapter
 {
@@ -49,25 +51,25 @@ namespace cache_planner_request_adapter
 
 class NNCache
 {
+public:
     typedef double DataType;
     typedef flann::Index<flann::L2<DataType> > IndexType;
     typedef flann::Matrix<DataType> DatasetType;
     typedef boost::shared_ptr<IndexType> IndexPtr;
-    typedef boost::shared_ptr<DatasetType> DatasetPtr;    
+    typedef boost::shared_ptr<DatasetType> DatasetPtr;
+    /*Initializes cache with an empty dataset to begin with*/
+    virtual size_t feature_len(){return feature_len_;}
+    virtual size_t max_neighbors(){return max_neighbors_;}
+
 private:
     size_t feature_len_;
     size_t max_neighbors_;
     boost::shared_mutex index_mutex_;
     IndexPtr index_;
-    DatasetPtr dataset_;
+    mutable DatasetPtr dataset_;
 
-protected:
-
-    virtual size_t feature_len(){return feature_len_;}
-    virtual size_t max_neighbors(){return max_neighbors_;}
 public:
 
-    /*Initializes cache with an empty dataset to begin with*/
     NNCache(size_t feature_len, size_t max_neighbors, size_t trees = 1) : feature_len_(feature_len),
                                                         max_neighbors_(max_neighbors)
     {
@@ -75,7 +77,7 @@ public:
         index_.reset(new IndexType(*dataset_, flann::KDTreeIndexParams(trees)));
     }
 
-    bool getNeighbors(DatasetPtr query, std::vector<int> & query_results, float max_neighbor_distance) const
+    bool getNeighbors(DatasetPtr query, std::vector<size_t> & query_results, float max_neighbor_distance) const
     {
         boost::shared_lock<boost::shared_mutex> read_lock(const_cast<NNCache*>(this)->index_mutex_);
         if (index_->size() > 0)
@@ -114,20 +116,25 @@ public:
 
 class PlanNNCache : public NNCache
 {
-
+public:
     typedef planning_interface::MotionPlanResponse OutputType;
     typedef boost::shared_ptr<OutputType> OutputTypePtr;
     typedef planning_interface::MotionPlanRequest InputType;
     typedef std::map<const size_t, OutputType > OutputMap;
 
-protected:
-    OutputMap output_map_;
 
-    bool getKeyData(InputType & input, std::vector<double> & data)
+protected:
+    mutable OutputMap output_map_;
+public:
+    PlanNNCache(size_t feature_len, size_t max_neighbors, size_t trees = 1):
+        NNCache(feature_len, max_neighbors, trees)
+    {}
+
+    bool getKeyData(const InputType & input, std::vector<double> & data) const
     {
         moveit_msgs::Constraints goal_constraint = input.goal_constraints[0];
         // Convert goal joint constraints to goal joint position vector
-        data.resize(goal.joint_constraints.size(), 0);
+        data.resize(goal_constraint.joint_constraints.size(), 0);
         for(size_t j = 0; j < goal_constraint.joint_constraints.size(); ++j)
         {
             data[j] = goal_constraint.joint_constraints[j].position;
@@ -135,35 +142,35 @@ protected:
         return true;
     }
 
-    bool getClosestTranslation(std::vector<size_t> & ids, InputType & input, double max_distance, std::vector<OutputType> & translations)
+    bool getClosestTranslation(std::vector<size_t> & ids, InputType * input, float max_distance, std::vector<OutputType> & translations) const
     {
         std::vector<double> data;
         DatasetPtr query_dataset;
-        getKeyData(input, data);
-        query_dataset.reset(new DatasetType(data.pointer, 1, data.size()));
+        getKeyData(*input, data);
+        query_dataset.reset(new DatasetType(&data[0], 1, data.size()));
         std::vector<size_t> query_results;
         getNeighbors(query_dataset, query_results, max_distance);
         translations.clear();
         translations.reserve(query_results.size());
         for(size_t q = 0; q < query_results.size(); ++ q)
         {
-           translations.push_back(output_map[query_results[q]]);
+           translations.push_back(output_map_.at(query_results[q]));
         }
         return query_results.size() > 0;
     }
 
-    bool addTranslatedNeighbor(InputType &input, OutputType & output)
+    bool addTranslatedNeighbor(const InputType &input, const OutputType & output)
     {
         //Get the key
         std::vector<double> data;
         DatasetPtr input_key;
         getKeyData(input, data);
-        input_key.reset(new DatasetType(data.pointer, 1, data.size()));
+        input_key.reset(new DatasetType(&data[0], 1, data.size()));
         std::vector<size_t> inserted_indices;
-        addNeighbor(input_key, indices);
-        for(size_t i = 0; i < indices.size(); ++i)
+        addNeighbor(input_key, inserted_indices);
+        for(size_t i = 0; i < inserted_indices.size(); ++i)
         {
-            output_map_.insert(std::pair<InputType, OutputType>(input_key[i], output));
+            output_map_.insert(std::make_pair<size_t, OutputType>(inserted_indices[i], output));
         }
         return true;
     }
@@ -183,18 +190,70 @@ protected:
     bool use_nearest_neighbors_;
     double max_neighbor_distance_;
     ros::NodeHandle nh_;
-
+    mutable boost::shared_ptr<PlanNNCache> cache_;
 
 public:
   virtual std::string getDescription() const { return "Adapter that searches for nearby solution and uses it as starting point for further plans"; }
 
 
-    CacheAdapter() : planning_request_adapter::PlanningRequestAdapter(), nh_("~"),
-    dataset_(NULL, 0,6)
+    CacheAdapter() : planning_request_adapter::PlanningRequestAdapter(), nh_("~")
     {
         nh_.param("use_nearest_neighbors", use_nearest_neighbors_, true);
         nh_.param("max_neighbor_distance", max_neighbor_distance_, 0.1);
+        cache_.reset();
 
+    }
+
+  virtual bool prepareCache(const planning_scene::PlanningSceneConstPtr &planning_scene,
+                            const planning_interface::MotionPlanRequest &req) const
+    {
+        size_t num_joints = req.start_state.joint_state.position.size();
+        if(cache_== NULL || cache_->feature_len() != num_joints)
+            cache_.reset(new PlanNNCache(num_joints, max_neighbor_distance_));
+        return true;
+    }
+
+  virtual bool testResponseValidity(const planning_scene::PlanningSceneConstPtr& planning_scene,
+                                    const planning_interface::MotionPlanRequest &req,
+                                    const planning_interface::MotionPlanResponse &res) const
+    {
+        return planning_scene->isPathValid(*res.trajectory_, req.group_name, false);
+    }
+
+  virtual bool modifyRequest(const planning_scene::PlanningSceneConstPtr& planning_scene,
+                             const planning_interface::MotionPlanRequest &req,
+                             planning_interface::MotionPlanRequest &modified_req,
+                             planning_interface::MotionPlanResponse &cached_res) const
+    {
+        planning_interface::MotionPlanResponse res;
+        std::vector<size_t> ids;
+        std::vector<PlanNNCache::OutputType> responses;
+        modified_req = req;
+        if(!cache_->getClosestTranslation(ids, static_cast<PlanNNCache::InputType *>(&modified_req), 0.1, responses))
+            return false;
+        for(size_t i=0; i < responses.size(); ++i)
+        {
+            if(testResponseValidity(planning_scene, req, responses[i]))
+            {
+                cached_res = static_cast<planning_interface::MotionPlanResponse>(responses[i]);
+                robot_state::robotStateToRobotStateMsg(cached_res.trajectory_->getFirstWayPoint(), modified_req.start_state);
+                return true;
+            }
+        }
+        return false;
+    }
+
+  virtual bool appendTrajectory(planning_interface::MotionPlanResponse &cached_res_copy,
+                                planning_interface::MotionPlanResponse &new_res) const
+  {
+        cached_res_copy.trajectory_->append(*new_res.trajectory_, .001);
+        return true;
+  }
+
+  virtual bool addToCache(const planning_interface::MotionPlanRequest &req,
+                          const planning_interface::MotionPlanResponse &res) const
+    {
+        return cache_->addTranslatedNeighbor(req, res);
     }
 
   virtual bool adaptAndPlan(const PlannerFn &planner,
@@ -203,16 +262,42 @@ public:
                             planning_interface::MotionPlanResponse &res,
                             std::vector<std::size_t> &added_path_index) const
   {
-    robot_state::RobotState start_state = planning_scene->getCurrentState();
-    planning_interface::MotionPlanRequest req2(req);
 
-    bool success = planner(planning_scene, req2, res);
+    if(!prepareCache(planning_scene, req))
+        return false;
+
+    planning_interface::MotionPlanRequest modified_req(req);
+    planning_interface::MotionPlanResponse temp_response;
+    bool has_modified_request(false);
+    if(use_nearest_neighbors_ && modifyRequest(planning_scene, req, modified_req, res))
+    {
+        has_modified_request = true;
+    }
+
+    bool success = planner(planning_scene, modified_req, temp_response);
+    if(has_modified_request && appendTrajectory(res, temp_response))
+    {
+        size_t num_added_points = res.trajectory_->getWayPointCount() -
+                                temp_response.trajectory_->getWayPointCount();
+
+        for(std::vector<std::size_t>::iterator i = added_path_index.begin(); i != added_path_index.end(); ++i)
+            *i += num_added_points;
+
+        added_path_index.reserve(res.trajectory_->getWayPointCount());
+        added_path_index.insert(added_path_index.end(), 0, num_added_points);
+    }
+    else
+    {
+        res = temp_response;
+    }
+
+    if(use_nearest_neighbors_ && !has_modified_request)
+    {
+        addToCache(req, res);
+    }
+
     return success;
   }
-
-
-
-
 };
 
 }
