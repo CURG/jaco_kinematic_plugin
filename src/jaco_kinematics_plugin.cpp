@@ -184,7 +184,7 @@ bool JacoKinematicsPlugin::getNeighbor(const geometry_msgs::Pose & pose, std::ve
     if (index_->size() > 0)
     {
         std::vector<double> query_pose_mat_data(7,0.0f);
-        std::vector<std::vector<size_t> > query_results_tmp;
+        std::vector<std::vector<int> > query_results_tmp;
         flann::Matrix<double> query_pose_mat(&query_pose_mat_data[0], 1,7);
         if(!poseToMat(pose ,query_pose_mat))
             return false;

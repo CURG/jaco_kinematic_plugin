@@ -41,9 +41,8 @@
 #include <geometry_msgs/Pose.h>
 #include <boost/thread/locks.hpp>
 #include <boost/thread/shared_mutex.hpp>
-#include <boost/thread/shared_lock_guard.hpp>
 #include <moveit/profiler/profiler.h>
-
+#include <flann/flann.hpp>
 
 namespace jaco_kinematics_plugin
 {

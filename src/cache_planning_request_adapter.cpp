@@ -42,7 +42,8 @@
 #include <boost/thread/shared_mutex.hpp>
 #include <map>
 #include <moveit/robot_state/conversions.h>
-
+#include <std_srvs/Empty.h>
+#include <boost/range/algorithm.hpp>
 
 namespace cache_planner_request_adapter
 {
@@ -58,8 +59,6 @@ public:
     typedef boost::shared_ptr<IndexType> IndexPtr;
     typedef boost::shared_ptr<DatasetType> DatasetPtr;
     /*Initializes cache with an empty dataset to begin with*/
-    virtual size_t feature_len(){return feature_len_;}
-    virtual size_t max_neighbors(){return max_neighbors_;}
 
 private:
     size_t feature_len_;
@@ -67,14 +66,14 @@ private:
     boost::shared_mutex index_mutex_;
     IndexPtr index_;
     mutable DatasetPtr dataset_;
-
+    mutable std::vector< boost::shared_ptr<std::vector<double> > > points_;
 public:
 
     NNCache(size_t feature_len, size_t max_neighbors, size_t trees = 1) : feature_len_(feature_len),
                                                         max_neighbors_(max_neighbors)
     {
         dataset_.reset(new DatasetType(NULL, 0, feature_len_));
-        index_.reset(new IndexType(*dataset_, flann::KDTreeIndexParams(trees)));
+        index_.reset(new IndexType(*dataset_, flann::KDTreeIndexParams(trees)));        
     }
 
     bool getNeighbors(DatasetPtr query, std::vector<size_t> & query_results, float max_neighbor_distance) const
@@ -97,6 +96,16 @@ public:
         return false;
     }
 
+    bool storeData(DatasetPtr newData, DatasetPtr & copiedData)
+    {
+        boost::shared_ptr<std::vector<double> > dataPtr;
+        dataPtr.reset(new std::vector<double>);
+        dataPtr->resize(newData->rows*newData->stride/sizeof(DataType),0);
+        memcpy(&((*dataPtr)[0]), (*newData)[0], newData->rows*newData->stride);
+        copiedData.reset(new DatasetType(&((*dataPtr)[0]), newData->rows, newData->cols, newData->stride));
+        this->points_.push_back(dataPtr);
+    }
+
     bool addNeighbor(DatasetPtr newData, std::vector<size_t> & ids)
     {
       /*Get a writeable lock because we are going to modify the cache datastructures*/
@@ -104,14 +113,21 @@ public:
       if (max_neighbors_ > 0 && index_->size() < max_neighbors_)
       {
         size_t old_last_index = index_->size();
-        index_->addPoints(*newData, 2);
+        DatasetPtr copiedData;
+        storeData(newData, copiedData);
+        index_->addPoints(*copiedData, 2);
         size_t new_last_index = index_->size();
-        ids.insert(ids.end(), old_last_index, new_last_index);
+        for(size_t i = old_last_index; i < new_last_index; ++i)
+            ids.push_back(i);
         ROS_ERROR_STREAM("Added points");
         return true;
       }
       return false;
    }
+
+    virtual size_t feature_len(){return feature_len_;}
+    virtual size_t max_neighbors(){return max_neighbors_;}
+    virtual size_t cache_size(){return index_->size();}
 };
 
 class PlanNNCache : public NNCache
@@ -131,7 +147,7 @@ public:
     {}
 
     bool getKeyData(const InputType & input, std::vector<double> & data) const
-    {
+    {        
         moveit_msgs::Constraints goal_constraint = input.goal_constraints[0];
         // Convert goal joint constraints to goal joint position vector
         data.resize(goal_constraint.joint_constraints.size(), 0);
@@ -139,6 +155,7 @@ public:
         {
             data[j] = goal_constraint.joint_constraints[j].position;
         }
+        ROS_INFO_STREAM("getKeyData data:" << goal_constraint);
         return true;
     }
 
@@ -183,14 +200,14 @@ class CacheAdapter : public planning_request_adapter::PlanningRequestAdapter
 
 
 protected:
-    typedef std::map<const size_t, planning_interface::MotionPlanResponse > TranslationMap;
     flann::Index<flann::L2<double> > *index_;
     flann::Matrix<double> dataset_;
-    TranslationMap translation_map_;
-    bool use_nearest_neighbors_;
-    double max_neighbor_distance_;
-    ros::NodeHandle nh_;
+    mutable bool use_nearest_neighbors_;
+    mutable double max_neighbor_distance_;
+    mutable ros::NodeHandle nh_;
     mutable boost::shared_ptr<PlanNNCache> cache_;
+    mutable ros::ServiceServer update_params_srv_;
+    mutable ros::ServiceServer reset_cache_srv_;
 
 public:
   virtual std::string getDescription() const { return "Adapter that searches for nearby solution and uses it as starting point for further plans"; }
@@ -198,48 +215,110 @@ public:
 
     CacheAdapter() : planning_request_adapter::PlanningRequestAdapter(), nh_("~")
     {
+       reset_cache_srv_ = nh_.advertiseService("reset_cache", &CacheAdapter::resetCache, this);
+       update_params_srv_ = nh_.advertiseService("update_params", &CacheAdapter::updateParams, this);
+       std_srvs::Empty::Request req;
+       std_srvs::Empty::Response res;
+       updateParams(req, res);
+       resetCache(req, res);
+    }
+
+    bool updateParams(std_srvs::Empty::Request &,
+                      std_srvs::Empty::Response & )
+    {
         nh_.param("use_nearest_neighbors", use_nearest_neighbors_, true);
         nh_.param("max_neighbor_distance", max_neighbor_distance_, 0.1);
-        cache_.reset();
+        return true;
+    }
 
+    bool resetCache(std_srvs::Empty::Request & ,
+                    std_srvs::Empty::Response & )
+    {
+        cache_.reset();
+        return true;
     }
 
   virtual bool prepareCache(const planning_scene::PlanningSceneConstPtr &planning_scene,
                             const planning_interface::MotionPlanRequest &req) const
     {
-        size_t num_joints = req.start_state.joint_state.position.size();
+        size_t num_joints = req.goal_constraints[0].joint_constraints.size();
         if(cache_== NULL || cache_->feature_len() != num_joints)
-            cache_.reset(new PlanNNCache(num_joints, max_neighbor_distance_));
+        {
+            cache_.reset(new PlanNNCache(num_joints, 100));
+            ROS_INFO_STREAM("Cache invalid: rebuilding");
+        }
         return true;
     }
 
   virtual bool testResponseValidity(const planning_scene::PlanningSceneConstPtr& planning_scene,
                                     const planning_interface::MotionPlanRequest &req,
-                                    const planning_interface::MotionPlanResponse &res) const
+                                    const planning_interface::MotionPlanResponse &res) const    
+    {        
+        return planning_scene->isPathValid(*res.trajectory_, req.group_name);
+    }
+
+    bool robotStateFromGoalConstraints(const planning_interface::MotionPlanRequest &req, robot_state::RobotStatePtr & state) const
     {
-        return planning_scene->isPathValid(*res.trajectory_, req.group_name, false);
+        state.reset(new robot_state::RobotState(req.start_state));
+        moveit_msgs::Constraints goal_constraint = req.goal_constraints[0];
+        for(size_t j = 0; j <goal_constraint.joint_constraints.size(); ++j)
+        {
+            const moveit_msgs::JointConstraint joint_constraint = goal_constraint.joint_constraints[j];
+            state->setVariablePosition(joint_constraint.joint_name, joint_constraint.position);
+        }
+        return true;
+    }
+
+  virtual bool getClosestState(robot_trajectory::RobotTrajectoryPtr & traj, const planning_interface::MotionPlanRequest &req, int & minElementInd) const
+    {
+        robot_state::RobotStatePtr goal_state;
+        if(!robotStateFromGoalConstraints(req, goal_state))
+            return false;
+        minElementInd = -1;
+        double minValue = -1.0f;
+        for(size_t w = 0; w < traj->getWayPointCount(); ++w)
+        {
+            dist = traj->getWayPoint(w).distance(goal_state) < minElement;
+            if(dist < minValue)
+            {
+                minElementInd = w;
+                minValue = dist;
+            }
+        }
+
+        if(minElement < 0)
+            return false;
+        return true;
     }
 
   virtual bool modifyRequest(const planning_scene::PlanningSceneConstPtr& planning_scene,
                              const planning_interface::MotionPlanRequest &req,
                              planning_interface::MotionPlanRequest &modified_req,
-                             planning_interface::MotionPlanResponse &cached_res) const
+                             planning_interface::MotionPlanResponse &cached_res_copy) const
     {
         planning_interface::MotionPlanResponse res;
         std::vector<size_t> ids;
         std::vector<PlanNNCache::OutputType> responses;
         modified_req = req;
-        if(!cache_->getClosestTranslation(ids, static_cast<PlanNNCache::InputType *>(&modified_req), 0.1, responses))
+        if(!cache_->getClosestTranslation(ids, static_cast<PlanNNCache::InputType *>(&modified_req), max_neighbor_distance_, responses))
             return false;
         for(size_t i=0; i < responses.size(); ++i)
         {
             if(testResponseValidity(planning_scene, req, responses[i]))
             {
-                cached_res = static_cast<planning_interface::MotionPlanResponse>(responses[i]);
-                robot_state::robotStateToRobotStateMsg(cached_res.trajectory_->getFirstWayPoint(), modified_req.start_state);
-                return true;
+                res = static_cast<planning_interface::MotionPlanResponse>(responses[i]);
+                cached_res_copy.trajectory_.reset(new robot_trajectory::RobotTrajectory(res.trajectory_->getRobotModel(), res.trajectory_->getGroupName()));
+                cached_res_copy.trajectory_->append(*res.trajectory_, 0);                
+                robot_state::robotStateToRobotStateMsg(cached_res_copy.trajectory_->getLastWayPoint(), modified_req.start_state);
+                ROS_INFO_STREAM("Found valid cached plan");
+                return true;                
+            }
+            else
+            {
+                ROS_INFO_STREAM("Cached plan invalid");
             }
         }
+
         return false;
     }
 
@@ -247,6 +326,8 @@ public:
                                 planning_interface::MotionPlanResponse &new_res) const
   {
         cached_res_copy.trajectory_->append(*new_res.trajectory_, .001);
+        cached_res_copy.planning_time_ = new_res.planning_time_;
+        cached_res_copy.error_code_ = new_res.error_code_;
         return true;
   }
 
@@ -263,6 +344,7 @@ public:
                             std::vector<std::size_t> &added_path_index) const
   {
 
+    ROS_INFO_STREAM("cache_planning_request:: In adaptAndPlan");
     if(!prepareCache(planning_scene, req))
         return false;
 
@@ -272,6 +354,7 @@ public:
     if(use_nearest_neighbors_ && modifyRequest(planning_scene, req, modified_req, res))
     {
         has_modified_request = true;
+        ROS_INFO_STREAM("Request modified");
     }
 
     bool success = planner(planning_scene, modified_req, temp_response);
@@ -285,15 +368,17 @@ public:
 
         added_path_index.reserve(res.trajectory_->getWayPointCount());
         added_path_index.insert(added_path_index.end(), 0, num_added_points);
+        ROS_INFO_STREAM("Waypoints added");
     }
     else
     {
         res = temp_response;
     }
 
-    if(use_nearest_neighbors_ && !has_modified_request)
+    if(use_nearest_neighbors_ && !has_modified_request && success)
     {
         addToCache(req, res);
+        ROS_INFO_STREAM("Added to cache. Cache size:" << cache_->cache_size());
     }
 
     return success;
