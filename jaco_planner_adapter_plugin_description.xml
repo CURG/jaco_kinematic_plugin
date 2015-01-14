@@ -1,0 +1,7 @@
+<library path="lib/libjaco_planning_adapter_plugin">
+  <class name="cache_planner_request_adapter/CacheAdapter" type="cache_planner_request_adapter::CacheAdapter" base_class_type="planning_request_adapter::PlanningRequestAdapter">
+    <description>
+      Adapter that searches for nearby solution and uses it as starting point for further plans.
+    </description>
+  </class>
+</library>
