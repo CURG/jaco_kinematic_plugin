@@ -294,7 +294,7 @@ public:
             }
         }
 
-        if(minElement < 0)
+        if(minElementInd < 0)
             return false;
         return true;
     }
