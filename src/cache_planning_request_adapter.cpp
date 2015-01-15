@@ -262,9 +262,9 @@ public:
         return trajectory_validity;
     }
 
-    bool robotStateFromGoalConstraints(const planning_interface::MotionPlanRequest &req, robot_state::RobotStatePtr & state) const
+    bool robotStateFromGoalConstraints(const planning_scene::PlanningSceneConstPtr& planning_scene, const planning_interface::MotionPlanRequest &req, robot_state::RobotStatePtr & state) const
     {
-        state.reset(new robot_state::RobotState(req.start_state));
+        state = planning_scene->getCurrentStateUpdated(req.start_state);
         moveit_msgs::Constraints goal_constraint = req.goal_constraints[0];
         for(size_t j = 0; j <goal_constraint.joint_constraints.size(); ++j)
         {
@@ -274,16 +274,19 @@ public:
         return true;
     }
 
-  virtual bool getClosestState(robot_trajectory::RobotTrajectoryPtr & traj, const planning_interface::MotionPlanRequest &req, int & minElementInd) const
+  virtual bool getClosestState(const planning_scene::PlanningSceneConstPtr& planning_scene,
+                               robot_trajectory::RobotTrajectoryPtr & traj,
+                               const planning_interface::MotionPlanRequest &req,
+                               int & minElementInd) const
     {
         robot_state::RobotStatePtr goal_state;
-        if(!robotStateFromGoalConstraints(req, goal_state))
+        if(!robotStateFromGoalConstraints(planning_scene, req, goal_state))
             return false;
         minElementInd = -1;
         double minValue = -1.0f;
         for(size_t w = 0; w < traj->getWayPointCount(); ++w)
         {
-            dist = traj->getWayPoint(w).distance(goal_state) < minElement;
+            double dist = traj->getWayPoint(w).distance(*goal_state) < minValue;
             if(dist < minValue)
             {
                 minElementInd = w;
