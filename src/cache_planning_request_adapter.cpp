@@ -254,7 +254,12 @@ public:
                                     const planning_interface::MotionPlanRequest &req,
                                     const planning_interface::MotionPlanResponse &res) const    
     {        
-        return planning_scene->isPathValid(*res.trajectory_, req.group_name);
+
+        bool starting_joint_position = planning_scene->getCurrentStateUpdated(req.start_state)->distance(res.trajectory_->getFirstWayPoint()) < .03;
+        if(! starting_joint_position)
+            return false;
+        bool trajectory_validity = planning_scene->isPathValid(*res.trajectory_, req.group_name);
+        return trajectory_validity;
     }
 
     bool robotStateFromGoalConstraints(const planning_interface::MotionPlanRequest &req, robot_state::RobotStatePtr & state) const
