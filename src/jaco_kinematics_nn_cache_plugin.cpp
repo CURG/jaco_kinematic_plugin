@@ -48,7 +48,7 @@ namespace jaco_kinematics_plugin
 {
   /* @brief A kinematics plugin that just adds timing information about the main IK function
    *  
-   * This class was constructed just to provide the best possible baseline. 
+   * This class was constructed just to provide the best possible baseline.
    */
     class JacoKinematicsTimingPlugin: public kdl_kinematics_plugin::KDLKinematicsPlugin
     {
@@ -91,33 +91,167 @@ namespace jaco_kinematics_plugin
     {
 
 
+        class NNCache
+        {
+        public:
+            typedef double DataType;
+            typedef flann::Index<flann::L2<DataType> > IndexType;
+            typedef flann::Matrix<DataType> DatasetType;
+            typedef boost::shared_ptr<IndexType> IndexPtr;
+            typedef boost::shared_ptr<DatasetType> DatasetPtr;
+            /*Initializes cache with an empty dataset to begin with*/
 
-    private:
-        typedef std::map<const size_t, std::vector<double> > TranslationMap;
+        private:
+            size_t feature_len_;
+            size_t max_neighbors_;
+            boost::shared_mutex index_mutex_;
+            IndexPtr index_;
+            mutable DatasetPtr dataset_;
+            mutable std::vector< boost::shared_ptr<std::vector<double> > > points_;
+        public:
 
-        flann::Index<flann::L2<double> > *index_;
-        flann::Matrix<double> empty_dataset;
+            NNCache(size_t feature_len, size_t max_neighbors, size_t trees = 1) : feature_len_(feature_len),
+                                                                                  max_neighbors_(max_neighbors)
+            {
+                dataset_.reset(new DatasetType(NULL, 0, feature_len_));
+                index_.reset(new IndexType(*dataset_, flann::KDTreeIndexParams(trees)));
+            }
 
-        TranslationMap translation_map_;
-        std::vector<double> consistency_limits_;
+            bool getNeighbors(DatasetPtr query, std::vector<size_t> & query_results, float max_neighbor_distance) const
+            {
+                boost::shared_lock<boost::shared_mutex> read_lock(const_cast<NNCache*>(this)->index_mutex_);
+                if (index_->size() > 0)
+                {
+                    std::vector<std::vector<size_t> > query_results_tmp;
+                    std::vector<std::vector<double> >query_distances;
+                    flann::SearchParams params(32, 0.0, false);
 
-        bool poseToMat(const geometry_msgs::Pose & pose ,flann::Matrix<double> & mat) const;
-        bool matToPose(const flann::Matrix<double> & mat, geometry_msgs::Pose & pose) const;
-        bool getNeighbor(const geometry_msgs::Pose & pose, std::vector<int> & query_results) const;
-        bool addItem(const geometry_msgs::Pose & pose, const std::vector<double> & translation);
-        bool getClosestTranslation( int & id, const geometry_msgs::Pose & pose, std::vector<double> &translation) const;
+
+                    index_->radiusSearch(*query, query_results_tmp, query_distances, max_neighbor_distance, params);
+
+                    for (size_t i = 0; i < query_results_tmp.size(); ++i)
+                        query_results.insert(query_results.end(), query_results_tmp[i].begin(), query_results_tmp[i].end());
+
+                    return query_results.size() > 0;
+                }
+                return false;
+            }
+
+            bool storeData(DatasetPtr newData, DatasetPtr & copiedData)
+            {
+                boost::shared_ptr<std::vector<double> > dataPtr;
+                dataPtr.reset(new std::vector<double>);
+                dataPtr->resize(newData->rows*newData->stride/sizeof(DataType),0);
+                memcpy(&((*dataPtr)[0]), (*newData)[0], newData->rows*newData->stride);
+                copiedData.reset(new DatasetType(&((*dataPtr)[0]), newData->rows, newData->cols, newData->stride));
+                this->points_.push_back(dataPtr);
+            }
+
+            bool addNeighbor(DatasetPtr newData, std::vector<size_t> & ids)
+            {
+                /*Get a writeable lock because we are going to modify the cache datastructures*/
+                boost::unique_lock<boost::shared_mutex> write_lock(const_cast<NNCache*>(this)->index_mutex_);
+                if (max_neighbors_ > 0 && index_->size() < max_neighbors_)
+                {
+                    size_t old_last_index = index_->size();
+                    DatasetPtr copiedData;
+                    storeData(newData, copiedData);
+                    index_->addPoints(*copiedData, 2);
+                    size_t new_last_index = index_->size();
+                    for(size_t i = old_last_index; i < new_last_index; ++i)
+                        ids.push_back(i);
+                    ROS_ERROR_STREAM("Added points");
+                    return true;
+                }
+                return false;
+            }
+
+            virtual size_t feature_len(){return feature_len_;}
+            virtual size_t max_neighbors(){return max_neighbors_;}
+            virtual size_t cache_size(){return index_->size();}
+        };
+
+        class KinematicsNNCache : public NNCache {
+        public:
+            typedef std::vector<double> OutputType;
+            typedef boost::shared_ptr<OutputType> OutputTypePtr;
+            typedef geometry_msgs::Pose InputType;
+            typedef std::map<const size_t, OutputType> OutputMap;
+
+
+        protected:
+            mutable OutputMap output_map_;
+        public:
+            KinematicsNNCache(size_t feature_len, size_t max_neighbors, size_t trees = 1) :
+                    NNCache(feature_len, max_neighbors, trees) {
+            }
+
+            bool getKeyData(const InputType &input, std::vector<double> &data) const {
+                data.resize(7);
+                data[0] = input.position.x;
+                data[1] = input.position.y;
+                data[2] = input.position.z;
+                data[3] = input.orientation.w;
+                data[4] = input.orientation.x;
+                data[5] = input.orientation.y;
+                data[6] = input.orientation.z;
+                return true;
+            }
+
+            bool getClosestTranslation(std::vector<size_t> &ids, const InputType *input, float max_distance, std::vector<OutputType> &translations) const {
+                std::vector<double> data;
+                DatasetPtr query_dataset;
+                getKeyData(*input, data);
+                query_dataset.reset(new DatasetType(&data[0], 1, data.size()));
+                std::vector<size_t> query_results;
+                getNeighbors(query_dataset, query_results, max_distance);
+                translations.clear();
+                translations.reserve(query_results.size());
+                for (size_t q = 0; q < query_results.size(); ++q) {
+                    translations.push_back(output_map_.at(query_results[q]));
+                }
+                return query_results.size() > 0;
+            }
+
+            bool addTranslatedNeighbor(const InputType &input, const OutputType &output) {
+                //Get the key
+                std::vector<double> data;
+                DatasetPtr input_key;
+                getKeyData(input, data);
+                input_key.reset(new DatasetType(&data[0], 1, data.size()));
+                std::vector<size_t> inserted_indices;
+                addNeighbor(input_key, inserted_indices);
+                for (size_t i = 0; i < inserted_indices.size(); ++i) {
+                    output_map_.insert(std::make_pair<size_t, OutputType>(inserted_indices[i], output));
+                }
+                return true;
+            }
+
+        };
+
         bool use_nearest_neighbors_;
         double max_neighbor_distance_;
-        boost::shared_mutex index_mutex_;
+        mutable boost::shared_ptr<KinematicsNNCache> cache_;
 
     public:
-        JacoKinematicsNNCachePlugin():KDLKinematicsPlugin(),
-            empty_dataset(NULL, 0,7)
+        JacoKinematicsNNCachePlugin():KDLKinematicsPlugin()
         {
             ros::NodeHandle private_handle("~");
             private_handle.param("use_nearest_neighbors", use_nearest_neighbors_, true);
             private_handle.param("max_neighbor_distance", max_neighbor_distance_, 0.1);
-            index_ = new flann::Index< flann::L2<double> >(empty_dataset, flann::KDTreeIndexParams(1));
+        }
+
+
+        virtual bool prepareCache() const
+        {
+            if(cache_== NULL)
+            {
+                // geometry_msgs.Pose always has 7 members
+                size_t feature_len = 7;
+                cache_.reset(new KinematicsNNCache(7, 100));
+                ROS_INFO_STREAM("Cache invalid: rebuilding");
+            }
+            return true;
         }
 
 
@@ -131,115 +265,53 @@ namespace jaco_kinematics_plugin
                                       const kinematics::KinematicsQueryOptions &options) const
         {
             moveit::tools::Profiler::ScopedStart prof_start;
-            moveit::tools::Profiler::ScopedBlock prof_block("JacoKinematicsPluginDefault::searchPositionIK");
+            moveit::tools::Profiler::ScopedBlock prof_block("JacoKinematicsPluginCachePlugin::searchPositionIK");
             std::vector <double> desired_joints(6,0);
-            int id(-1);
-            if (use_nearest_neighbors_)
-                getClosestTranslation(id, ik_pose,desired_joints);
-            if(id > 0)
+            bool neighbor_found = false;
+            if (use_nearest_neighbors_) {
+                prepareCache();
+                std::vector<size_t> ids;
+                std::vector<KinematicsNNCache::OutputType> responses;
+
+                cache_->getClosestTranslation(ids, static_cast<const KinematicsNNCache::InputType *>(&ik_pose), max_neighbor_distance_, responses);
+                if(ids.size() > 0) {
+
+                    desired_joints = responses[0];
+                    neighbor_found = true;
+                }
+            }
+
+            if(!neighbor_found)
            {
                 for (int i=0; i < 6; ++i)
                     desired_joints[i] = ik_seed_state[i];
             }
 
+
             bool success = kdl_kinematics_plugin::KDLKinematicsPlugin::searchPositionIK(ik_pose,
-                                                                                        ik_seed_state,
+                                                                                        desired_joints,
                                                                                         timeout,
                                                                                         solution,
                                                                                         solution_callback,
                                                                                         error_code,
                                                                                         consistency_limits,
                                                                                         options);
-            if (success && id < 0 && use_nearest_neighbors_)
-                const_cast<JacoKinematicsNNCachePlugin*>(this)->addItem(ik_pose, solution);
+            //while(solution[5] > M_PI)
+            //    solution[5] -= 2*M_PI;
+            //while(solution[5] < -M_PI)
+            //    solution[5] += 2*M_PI;
+
+            //solution[5] += M_PI;
+
+            if (success && !neighbor_found && use_nearest_neighbors_)
+                cache_->addTranslatedNeighbor(ik_pose, solution);
+	    if(!success && neighbor_found)
+	      ROS_ERROR_STREAM("Neighbor found but ik search failed");
             moveit::tools::Profiler::Console();
             return success;
         }
 
     };
-
-
-
-    bool JacoKinematicsNNCachePlugin::poseToMat(const geometry_msgs::Pose & pose ,flann::Matrix<double> & mat) const
-    {
-        mat[0][0] = pose.position.x;
-        mat[0][1] = pose.position.y;
-        mat[0][2] = pose.position.z;
-        mat[0][3] = pose.orientation.w;
-        mat[0][4] = pose.orientation.x;
-        mat[0][5] = pose.orientation.y;
-        mat[0][6] = pose.orientation.z;
-    }
-
-    bool JacoKinematicsNNCachePlugin::matToPose(const flann::Matrix<double> & mat, geometry_msgs::Pose & pose) const
-    {
-        pose.position.x = mat[0][0];
-        pose.position.y = mat[0][1];
-        pose.position.z = mat[0][2];
-        pose.orientation.w = mat[0][3];
-        pose.orientation.x = mat[0][4];
-        pose.orientation.y = mat[0][5];
-        pose.orientation.z = mat[0][6];
-    }
-
-
-
-    bool JacoKinematicsNNCachePlugin::getNeighbor(const geometry_msgs::Pose & pose, std::vector<int> & query_results) const
-    {
-      //Read lock to read FLANN index 
-      boost::shared_lock<boost::shared_mutex> read_lock(const_cast<JacoKinematicsNNCachePlugin*>(this)->index_mutex_);
-
-        if (index_->size() > 0)
-        {
-            std::vector<double> query_pose_mat_data(7,0.0f);
-            std::vector<std::vector<size_t> > query_results_tmp;
-            flann::Matrix<double> query_pose_mat(&query_pose_mat_data[0], 1,7);
-            if(!poseToMat(pose ,query_pose_mat))
-                return false;
-            std::vector<std::vector<double> >query_distances;
-            flann::SearchParams params(32, 0.0, false);
-
-
-            index_->radiusSearch(query_pose_mat, query_results_tmp, query_distances, max_neighbor_distance_, params);
-
-            for (size_t i = 0; i < query_results_tmp.size(); ++i)
-                query_results.insert(query_results.end(), query_results_tmp[i].begin(), query_results_tmp[i].end());
-
-            return query_results.size() > 0;
-        }
-        return false;
-    }
-
-    /*A validation function would go here if there was one */
-    bool JacoKinematicsNNCachePlugin::getClosestTranslation(int & id, const geometry_msgs::Pose & pose, std::vector<double> &translation) const
-    {
-      //Read map to access translation map
-       boost::shared_lock<boost::shared_mutex> read_lock(const_cast<JacoKinematicsNNCachePlugin*>(this)->index_mutex_);
-        std::vector<int> query_results;
-        if (!getNeighbor(pose, query_results))
-            return false;
-        id = query_results[0];
-        translation = translation_map_.at(id);
-        return true;
-    }
-
-    bool JacoKinematicsNNCachePlugin::addItem(const geometry_msgs::Pose & pose, const std::vector<double> & translation)
-    {
-      /*Get a writeable lock because we are going to modify the cache datastructures*/
-      boost::unique_lock<boost::shared_mutex> write_lock(const_cast<JacoKinematicsNNCachePlugin*>(this)->index_mutex_);
-
-
-       
-      std::vector<double> mat_data(7, 0.0f);
-      flann::Matrix<double> mat(&mat_data[0], 1, 7);
-      poseToMat(pose, mat);
-      index_->addPoints(mat, 2);
-      ROS_ERROR_STREAM("Added points");
-      //There is probably a better way to get the identifier, but for now, do it the easiest way
-      int id = index_->size() - 1;
-      translation_map_.insert(std::make_pair<int, std::vector<double> >(id, translation));
-    }
-  
   
 } // namespace
 

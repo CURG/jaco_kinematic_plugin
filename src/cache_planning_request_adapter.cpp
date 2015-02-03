@@ -299,6 +299,35 @@ public:
         return true;
     }
 
+  virtual void modifyGoalJoints(planning_interface::MotionPlanRequest &modified_req) const
+  {
+      for(size_t goal_ind = 0; goal_ind < modified_req.goal_constraints.size(); ++goal_ind)
+      {
+            for(size_t jc_ind = 0; jc_ind <  modified_req.goal_constraints[goal_ind].joint_constraints.size(); ++jc_ind) {
+                ROS_ERROR_STREAM(modified_req.goal_constraints[goal_ind].joint_constraints[jc_ind].joint_name);
+                if (!modified_req.goal_constraints[goal_ind].joint_constraints[jc_ind].joint_name.compare("mico_joint_6")) {
+                    double joint_val = modified_req.goal_constraints[goal_ind].joint_constraints[jc_ind].position;
+                    while (joint_val > 2 * M_PI)
+                        joint_val -= 2 * M_PI;
+                    while (joint_val < 0)
+                        joint_val += 2 * M_PI;
+
+                    std::string mico_joint_6_name("mico_joint_6");
+                    size_t ind = std::find(modified_req.start_state.joint_state.name.begin(), modified_req.start_state.joint_state.name.end(), mico_joint_6_name) - modified_req.start_state.joint_state.name.begin();
+
+                    double joint_6_val(modified_req.start_state.joint_state.position[ind]);
+
+                    if (joint_val - joint_6_val > M_PI / 2.0)
+                        joint_val = -fmod(joint_val - joint_6_val, M_PI / 2.0) + joint_6_val;
+
+                    modified_req.start_state.joint_state.position[ind] = joint_val;
+                }
+            }
+
+      }
+  }
+
+
   virtual bool modifyRequest(const planning_scene::PlanningSceneConstPtr& planning_scene,
                              const planning_interface::MotionPlanRequest &req,
                              planning_interface::MotionPlanRequest &modified_req,
@@ -317,9 +346,17 @@ public:
                 res = static_cast<planning_interface::MotionPlanResponse>(responses[i]);
                 cached_res_copy.trajectory_.reset(new robot_trajectory::RobotTrajectory(res.trajectory_->getRobotModel(), res.trajectory_->getGroupName()));
                 cached_res_copy.trajectory_->append(*res.trajectory_, 0);                
-                robot_state::robotStateToRobotStateMsg(cached_res_copy.trajectory_->getLastWayPoint(), modified_req.start_state);
-                ROS_INFO_STREAM("Found valid cached plan");
-                return true;                
+                robot_state::robotStateToRobotStateMsg(cached_res_copy.trajectory_->getLastWayPoint(), modified_req.start_state, true);
+                modified_req.start_state.joint_state.velocity.clear();
+                if(modified_req.start_state.joint_state.velocity.size() > 0)
+                    ROS_INFO_STREAM(" modified_req start state too large!");
+                ROS_INFO_STREAM("Original plan: " << req);
+                ROS_INFO_STREAM("Found valid cached plan: " << modified_req);
+                if(!planning_scene->isStateValid(modified_req.start_state, req.group_name, true))
+                    ROS_INFO_STREAM("start state invalid");
+                else
+                    ROS_INFO_STREAM("start state valid");
+                return true;
             }
             else
             {
@@ -356,7 +393,7 @@ public:
     if(!prepareCache(planning_scene, req))
         return false;
 
-    planning_interface::MotionPlanRequest modified_req(req);
+    planning_interface::MotionPlanRequest modified_req = req;
     planning_interface::MotionPlanResponse temp_response;
     bool has_modified_request(false);
     if(use_nearest_neighbors_ && modifyRequest(planning_scene, req, modified_req, res))
@@ -364,9 +401,15 @@ public:
         has_modified_request = true;
         ROS_INFO_STREAM("Request modified");
     }
+    else {
+        ROS_INFO_STREAM("Request not modified");
+    }
 
-    bool success = planner(planning_scene, modified_req, temp_response);
-    if(has_modified_request && appendTrajectory(res, temp_response))
+    modifyGoalJoints(modified_req);
+
+
+      bool success = planner(planning_scene, modified_req, temp_response);
+    if(success && has_modified_request && appendTrajectory(res, temp_response))
     {
         size_t num_added_points = res.trajectory_->getWayPointCount() -
                                 temp_response.trajectory_->getWayPointCount();
